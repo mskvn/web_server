@@ -1,9 +1,15 @@
+import io
 import logging
+import mimetypes
+import ntpath
+import os
 import socket
+import sys
 from collections import namedtuple
 from email.parser import Parser
 from optparse import OptionParser
-import traceback
+
+from jinja2 import Template
 
 LOG_LEVELS = {
     'INFO': logging.INFO,
@@ -14,8 +20,8 @@ LOG_LEVELS = {
 MAX_LINE_LENGTH = 64 * 1024
 MAX_HEADERS = 100
 
-Request = namedtuple('Request', ['method', 'target', 'version', 'header' 'rfile'])
-Response = namedtuple('Response', ['status', 'reason', 'headers', 'body'])
+HttpRequest = namedtuple('HttpRequest', ['method', 'target', 'version', 'header', 'rfile'])
+HttpResponse = namedtuple('HttpResponse', ['status', 'reason', 'headers', 'body'])
 
 
 class HTTPError(Exception):
@@ -27,9 +33,10 @@ class HTTPError(Exception):
 
 
 class WebServer:
-    def __init__(self, host, port):
+    def __init__(self, host, port, document_root):
         self.host = host
         self.port = port
+        self.document_root = document_root
 
     def serve_forever(self):
         serv_sock = socket.socket(
@@ -87,7 +94,7 @@ class WebServer:
         if not host:
             raise HTTPError(400, 'Bad request')
 
-        return Request(method, target, ver, headers, rfile)
+        return HttpRequest(method, target, None, None, None)
 
     def parse_headers(self, rfile):
         headers = []
@@ -108,9 +115,71 @@ class WebServer:
 
     def handle_request(self, request):
         if request.method in ['GET', 'HEAD']:
-            return Response(200, 'OK', [], None)
+            file, file_name = self.get_file(request.target)
+            if file:
+                headers = dict()
+                ctype = mimetypes.MimeTypes().guess_type(file_name)[0]
+                headers['Content-type'] = ctype
+                headers['Content-Length'] = len(file.getbuffer())
+                headers['Date'] = ''  # TODO: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
+                headers['Connection'] = 'close'
+                headers['Server'] = 'WebServer/1.0'
+                return HttpResponse(200, 'OK', headers, file)
+            return HttpResponse(404, 'File not found', {}, None)
 
-        return Response(405, 'Method not allowed', [], None)
+        return HttpResponse(405, 'Method not allowed', {}, None)
+
+    def get_file(self, path):
+        path = self.build_path(path)
+        if os.path.isdir(path):
+            list_dir = os.listdir(path)
+            if "index.html" in list_dir:
+                path = os.path.join(path, "index.html")
+            else:
+                return self.build_list_dir_html(path, list_dir)
+        if os.path.isfile(path):
+            f = open(path, 'rb')
+            return io.BytesIO(f.read()), ntpath.basename(path)
+        return None, None
+
+    def build_path(self, path):
+        if path == '/':
+            return self.document_root
+        # TODO : handle special symbols in path
+        return os.path.join(self.document_root, path.strip(os.sep))
+
+    def build_list_dir_html(self, path, list_dir):
+        template = Template("""
+        <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
+                <html>
+                <head>
+                <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
+                <title>Directory listing for {{ dir_path }}</title>
+                </head>
+                <body>
+                <h1>Directory listing for {{ dir_path }}</h1>
+                <hr>
+                <ul>
+                {% for name in list_links %}
+                    <li><a href="{{ name }}">{{ name }}</a></li>
+                {% endfor %}
+                </ul>
+                <hr>
+                </body>
+                </html>
+        """)
+        list_links = list()
+        for name in list_dir:
+            full_name = os.path.join(path, name)
+            link = name
+            if os.path.isdir(full_name):
+                link = link + '/'
+            list_links.append(link)
+        enc = sys.getfilesystemencoding()
+        index_html = template.render(dir_path=path, list_links=list_links).encode(enc, 'surrogateescape')
+        f = io.BytesIO()
+        f.write(index_html)
+        return f, 'index.html'
 
     def send_response(self, conn, resp):
         wfile = conn.makefile('wb')
@@ -118,14 +187,14 @@ class WebServer:
         wfile.write(status_line.encode('iso-8859-1'))
 
         if resp.headers:
-            for (key, value) in resp.headers:
+            for (key, value) in resp.headers.items():
                 header_line = f'{key}: {value}\r\n'
                 wfile.write(header_line.encode('iso-8859-1'))
 
         wfile.write(b'\r\n')
 
         if resp.body:
-            wfile.write(resp.body)
+            wfile.write(resp.body.getvalue())
 
         wfile.flush()
         wfile.close()
@@ -139,7 +208,7 @@ class WebServer:
             status = 500
             reason = b'Internal Server Error'
             body = b'Internal Server Error'
-        resp = Response(status, reason, [('Content-Length', len(body))], body)
+        resp = HttpResponse(status, reason, [('Content-Length', len(body))], body)
         self.send_response(conn, resp)
 
 
@@ -150,12 +219,13 @@ def main():
     op.add_option("-w", "--workers", action="store", type=int, default=1)
     op.add_option("-l", "--log", action="store", default=None)
     op.add_option("-e", "--log_level", action="store", default='INFO')
+    op.add_option("-r", "--root", action="store", default=os.getcwd())
     opts, _ = op.parse_args()
 
     logging.basicConfig(filename=opts.log, level=LOG_LEVELS.get(opts.log_level, 'INFO'),
                         format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
 
-    server = WebServer(opts.address, opts.port)
+    server = WebServer(opts.address, opts.port, opts.root)
     try:
         logging.info("Starting server at %s" % opts.port)
         server.serve_forever()
