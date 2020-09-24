@@ -8,6 +8,7 @@ import sys
 from collections import namedtuple
 from email.parser import Parser
 from optparse import OptionParser
+from concurrent.futures import ThreadPoolExecutor
 
 from jinja2 import Template
 
@@ -33,28 +34,25 @@ class HTTPError(Exception):
 
 
 class WebServer:
-    def __init__(self, host, port, document_root):
+    def __init__(self, host, port, document_root, workers):
         self.host = host
         self.port = port
         self.document_root = document_root
+        self.workers = int(workers)
 
     def serve_forever(self):
-        serv_sock = socket.socket(
-            socket.AF_INET,
-            socket.SOCK_STREAM,
-            proto=0)
-
+        serv_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM, proto=0)
+        serv_sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        pool = ThreadPoolExecutor(self.workers)
         try:
             serv_sock.bind((self.host, self.port))
-            serv_sock.listen()
-
+            serv_sock.listen(self.workers)
             while True:
                 conn, addr = serv_sock.accept()
-                logging.debug(f'Client connected from {addr[0]}:{addr[1]}')
                 try:
-                    self.serve_client(conn)
+                    pool.submit(self.serve_client, conn)
                 except Exception as e:
-                    print('Client serving failed', e)
+                    logging.error('Client serving failed', e)
         finally:
             serv_sock.close()
 
@@ -229,7 +227,7 @@ def main():
     logging.basicConfig(filename=opts.log, level=LOG_LEVELS.get(opts.log_level, 'INFO'),
                         format='[%(asctime)s] %(levelname).1s %(message)s', datefmt='%Y.%m.%d %H:%M:%S')
 
-    server = WebServer(opts.address, opts.port, opts.root)
+    server = WebServer(opts.address, opts.port, opts.root, opts.workers)
     try:
         logging.info("Starting server at %s" % opts.port)
         server.serve_forever()
