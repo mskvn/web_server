@@ -4,13 +4,12 @@ import mimetypes
 import ntpath
 import os
 import socket
-import sys
 from collections import namedtuple
-from email.parser import Parser
-from optparse import OptionParser
 from concurrent.futures import ThreadPoolExecutor
-
-from jinja2 import Template
+from email.parser import Parser
+from email.utils import formatdate
+from optparse import OptionParser
+from urllib.parse import urlparse, unquote
 
 LOG_LEVELS = {
     'INFO': logging.INFO,
@@ -64,7 +63,7 @@ class WebServer:
         except ConnectionResetError as e:
             logging.error(str(e))
             conn = None
-        except Exception as e:
+        except HTTPError as e:
             logging.error(str(e))
             self.send_error(conn, e)
 
@@ -81,16 +80,14 @@ class WebServer:
         req_line = req_line.rstrip('\r\n')
         words = req_line.split()
         if len(words) != 3:
-            raise HTTPError(400, 'Malformed request line')
+            logging.error('Malformed request line')
 
         method, target, ver = words
-        if ver != 'HTTP/1.1':
-            raise HTTPError(400, 'Unexpected HTTP version')
 
         headers = self.parse_headers(rfile)
         host = headers.get('Host')
         if not host:
-            raise HTTPError(400, 'Bad request')
+            logging.error('Host undefined')
 
         return HttpRequest(method, target, None, None, None)
 
@@ -112,76 +109,49 @@ class WebServer:
         return Parser().parsestr(headers)
 
     def handle_request(self, request):
+        headers = {
+            'Date': formatdate(timeval=None, localtime=False, usegmt=True),
+            'Connection': 'close',
+            'Server': 'WebServer/1.0',
+            'Content-Length': 0
+        }
         if request.method in ['GET', 'HEAD']:
             file, file_name = self.get_file(request.target)
             if file:
-                headers = dict()
                 ctype = mimetypes.MimeTypes().guess_type(file_name)[0]
                 headers['Content-type'] = ctype
                 headers['Content-Length'] = len(file.getbuffer())
-                headers['Date'] = ''  # TODO: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
-                headers['Connection'] = 'close'
-                headers['Server'] = 'WebServer/1.0'
                 if request.method == 'GET':
                     return HttpResponse(200, 'OK', headers, file)
                 else:
                     file.close()
-                    return HttpResponse(200, 'OK', headers, None)
-            return HttpResponse(404, 'File not found', {}, None)
+                return HttpResponse(200, 'OK', headers, None)
 
-        return HttpResponse(405, 'Method not allowed', {}, None)
+            return HttpResponse(404, 'File not found', headers, None)
 
-    def get_file(self, path):
-        path = self.build_path(path)
+        return HttpResponse(405, 'Method not allowed', headers, None)
+
+    def get_file(self, target):
+        path = self.get_path(target)
+        if self.document_root not in path:
+            return None, None
         if os.path.isdir(path):
             list_dir = os.listdir(path)
             if "index.html" in list_dir:
                 path = os.path.join(path, "index.html")
             else:
-                return self.build_list_dir_html(path, list_dir)
+                return None, None
         if os.path.isfile(path):
             f = open(path, 'rb')
             return io.BytesIO(f.read()), ntpath.basename(path)
         return None, None
 
-    def build_path(self, path):
+    def get_path(self, target):
+        path = unquote(urlparse(target).path)
         if path == '/':
             return self.document_root
-        # TODO : handle special symbols in path
-        return os.path.join(self.document_root, path.strip(os.sep))
-
-    def build_list_dir_html(self, path, list_dir):
-        template = Template("""
-        <!DOCTYPE HTML PUBLIC "-//W3C//DTD HTML 4.01//EN" "http://www.w3.org/TR/html4/strict.dtd">
-                <html>
-                <head>
-                <meta http-equiv="Content-Type" content="text/html; charset=utf-8">
-                <title>Directory listing for {{ dir_path }}</title>
-                </head>
-                <body>
-                <h1>Directory listing for {{ dir_path }}</h1>
-                <hr>
-                <ul>
-                {% for name in list_links %}
-                    <li><a href="{{ name }}">{{ name }}</a></li>
-                {% endfor %}
-                </ul>
-                <hr>
-                </body>
-                </html>
-        """)
-        list_links = list()
-        for name in list_dir:
-            full_name = os.path.join(path, name)
-            link = name
-            if os.path.isdir(full_name):
-                link = link + '/'
-            list_links.append(link)
-        enc = sys.getfilesystemencoding()
-        index_html = template.render(dir_path=path, list_links=list_links).encode(enc, 'surrogateescape')
-        f = io.BytesIO()
-        f.write(index_html)
-        return f, 'index.html'
+        full_path = os.path.join(self.document_root, path.strip(os.sep))
+        return os.path.realpath(full_path)
 
     def send_response(self, conn, resp):
         wfile = conn.makefile('wb')
@@ -196,7 +166,8 @@ class WebServer:
         wfile.write(b'\r\n')
 
         if resp.body:
-            wfile.write(resp.body.getvalue())
+            body_value = resp.body.getvalue() if isinstance(resp.body, io.BytesIO) else resp.body
+            wfile.write(body_value)
 
         wfile.flush()
         wfile.close()
@@ -210,7 +181,7 @@ class WebServer:
             status = 500
             reason = b'Internal Server Error'
             body = b'Internal Server Error'
-        resp = HttpResponse(status, reason, [('Content-Length', len(body))], body)
+        resp = HttpResponse(status, reason, {'Content-Length': len(body)}, body)
         self.send_response(conn, resp)
 
 
