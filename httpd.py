@@ -53,6 +53,7 @@ class WebServer:
                 except Exception as e:
                     logging.error('Client serving failed', e)
         finally:
+            pool.shutdown()
             serv_sock.close()
 
     def serve_client(self, conn):
