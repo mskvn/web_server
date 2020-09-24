@@ -124,7 +124,11 @@ class WebServer:
                 headers['Date'] = ''  # TODO: <day-name>, <day> <month> <year> <hour>:<minute>:<second> GMT
                 headers['Connection'] = 'close'
                 headers['Server'] = 'WebServer/1.0'
-                return HttpResponse(200, 'OK', headers, file)
+                if request.method == 'GET':
+                    return HttpResponse(200, 'OK', headers, file)
+                else:
+                    file.close()
+                    return HttpResponse(200, 'OK', headers, None)
             return HttpResponse(404, 'File not found', {}, None)
 
         return HttpResponse(405, 'Method not allowed', {}, None)
