@@ -117,15 +117,14 @@ class WebServer:
             'Content-Length': 0
         }
         if request.method in ['GET', 'HEAD']:
-            file, file_name = self.get_file(request.target)
-            if file:
+            file_path, file_name = self.get_file(request.target)
+            if file_path:
                 ctype = mimetypes.MimeTypes().guess_type(file_name)[0]
                 headers['Content-type'] = ctype
-                headers['Content-Length'] = len(file.getbuffer())
+                headers['Content-Length'] = os.stat(file_path).st_size
                 if request.method == 'GET':
-                    return HttpResponse(200, 'OK', headers, file)
-                else:
-                    file.close()
+                    f = open(file_path, 'rb')
+                    return HttpResponse(200, 'OK', headers, io.BytesIO(f.read()))
                 return HttpResponse(200, 'OK', headers, None)
 
             return HttpResponse(404, 'File not found', headers, None)
@@ -143,8 +142,7 @@ class WebServer:
             else:
                 return None, None
         if os.path.isfile(path):
-            f = open(path, 'rb')
-            return io.BytesIO(f.read()), ntpath.basename(path)
+            return path, ntpath.basename(path)
         return None, None
 
     def get_path(self, target):
